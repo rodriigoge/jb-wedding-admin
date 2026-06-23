@@ -8,6 +8,10 @@ type RsvpsResponse =
       rows: RsvpConfirmationRow[];
     }
   | {
+      ok: true;
+      deletedId: string;
+    }
+  | {
       ok: false;
       message: string;
     };
@@ -22,42 +26,86 @@ function getBearerToken(req: NextApiRequest) {
   return authorization.slice("Bearer ".length);
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse<RsvpsResponse>) {
-  if (req.method !== "GET") {
-    res.setHeader("Allow", "GET");
-    return res.status(405).json({ ok: false, message: "Método não permitido." });
-  }
-
+async function getAuthorizedAdmin(req: NextApiRequest) {
   const token = getBearerToken(req);
 
   if (!token) {
-    return res.status(401).json({ ok: false, message: "Sessão não encontrada." });
+    return {
+      ok: false as const,
+      status: 401,
+      message: "Sessão não encontrada.",
+    };
+  }
+
+  const supabase = getSupabaseServerClient();
+  const { data: userData, error: userError } = await supabase.auth.getUser(token);
+
+  if (userError || !userData.user?.email) {
+    return {
+      ok: false as const,
+      status: 401,
+      message: "Sessão inválida ou expirada.",
+    };
+  }
+
+  const email = userData.user.email;
+  const { data: adminUser, error: adminError } = await supabase
+    .from("admin_users")
+    .select("id")
+    .ilike("email", email)
+    .maybeSingle();
+
+  if (adminError) {
+    return {
+      ok: false as const,
+      status: 500,
+      message: adminError.message,
+    };
+  }
+
+  if (!adminUser) {
+    return {
+      ok: false as const,
+      status: 403,
+      message: `O e-mail ${email} não está autorizado na tabela admin_users.`,
+    };
+  }
+
+  return {
+    ok: true as const,
+    supabase,
+  };
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse<RsvpsResponse>) {
+  if (req.method !== "GET" && req.method !== "DELETE") {
+    res.setHeader("Allow", "GET, DELETE");
+    return res.status(405).json({ ok: false, message: "Método não permitido." });
   }
 
   try {
-    const supabase = getSupabaseServerClient();
-    const { data: userData, error: userError } = await supabase.auth.getUser(token);
+    const admin = await getAuthorizedAdmin(req);
 
-    if (userError || !userData.user?.email) {
-      return res.status(401).json({ ok: false, message: "Sessão inválida ou expirada." });
+    if (!admin.ok) {
+      return res.status(admin.status).json({ ok: false, message: admin.message });
     }
 
-    const email = userData.user.email;
-    const { data: adminUser, error: adminError } = await supabase
-      .from("admin_users")
-      .select("id")
-      .ilike("email", email)
-      .maybeSingle();
+    const { supabase } = admin;
 
-    if (adminError) {
-      return res.status(500).json({ ok: false, message: adminError.message });
-    }
+    if (req.method === "DELETE") {
+      const id = typeof req.query.id === "string" ? req.query.id : "";
 
-    if (!adminUser) {
-      return res.status(403).json({
-        ok: false,
-        message: `O e-mail ${email} não está autorizado na tabela admin_users.`,
-      });
+      if (!id) {
+        return res.status(400).json({ ok: false, message: "Informe o id do registro." });
+      }
+
+      const { error } = await supabase.from("rsvp_confirmations").delete().eq("id", id);
+
+      if (error) {
+        return res.status(500).json({ ok: false, message: error.message });
+      }
+
+      return res.status(200).json({ ok: true, deletedId: id });
     }
 
     const { data, error } = await supabase

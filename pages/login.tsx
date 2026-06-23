@@ -20,7 +20,7 @@ export default function LoginPage() {
           await router.replace("/");
         }
       } catch (sessionError) {
-        setError(sessionError instanceof Error ? sessionError.message : "Não foi possível iniciar o Supabase.");
+        setError(sessionError instanceof Error ? sessionError.message : "Não foi possível iniciar a autenticação.");
       }
     }
 
@@ -63,7 +63,7 @@ export default function LoginPage() {
       <main className="login-page">
         <section className="login-panel" aria-labelledby="login-title">
           <p className="eyebrow">Painel dos noivos</p>
-          <h1 id="login-title">J&B</h1>
+          <h1 id="login-title">Jamila&Bruno</h1>
           <p className="login-copy">Acompanhe em um só lugar quem confirmou presença para o grande dia.</p>
 
           <form className="login-form" onSubmit={handleSubmit}>

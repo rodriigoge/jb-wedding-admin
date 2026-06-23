@@ -16,6 +16,12 @@ const statusClasses: Record<RsvpStatus, string> = {
   declined: "status-declined",
 };
 
+type ParsedNotes = {
+  adultNames: string | null;
+  childNames: string | null;
+  message: string | null;
+};
+
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
@@ -33,7 +39,37 @@ function normalize(value: string) {
     .toLowerCase();
 }
 
+function getSectionValue(notes: string, label: string) {
+  const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = notes.match(new RegExp(`${escapedLabel}:\\s*([\\s\\S]*?)(?=\\n\\n[A-Za-zÀ-ÿ]+:|$)`, "i"));
+
+  return match?.[1]?.trim() || null;
+}
+
+function parseNotes(notes: string | null): ParsedNotes {
+  if (!notes) {
+    return {
+      adultNames: null,
+      childNames: null,
+      message: null,
+    };
+  }
+
+  const adultNames = getSectionValue(notes, "Adultos");
+  const childNames = getSectionValue(notes, "Crianças");
+  const message = getSectionValue(notes, "Mensagem");
+  const hasStructuredNotes = adultNames || childNames || message;
+
+  return {
+    adultNames,
+    childNames,
+    message: hasStructuredNotes ? message : notes,
+  };
+}
+
 function mapRowToGuest(row: RsvpConfirmationRow): RsvpGuest {
+  const parsedNotes = parseNotes(row.notes);
+
   return {
     id: row.id,
     name: row.name,
@@ -41,6 +77,9 @@ function mapRowToGuest(row: RsvpConfirmationRow): RsvpGuest {
     companions: row.companions,
     status: row.status,
     notes: row.notes,
+    adultNames: parsedNotes.adultNames,
+    childNames: parsedNotes.childNames,
+    message: parsedNotes.message,
     totalPeople: row.total_people ?? (row.status === "confirmed" ? row.companions + 1 : 0),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -48,14 +87,26 @@ function mapRowToGuest(row: RsvpConfirmationRow): RsvpGuest {
 }
 
 function makeCsv(rows: RsvpGuest[]) {
-  const headers = ["Nome", "Telefone", "Acompanhantes", "Total de pessoas", "Status", "Observações", "Confirmado em"];
+  const headers = [
+    "Nome",
+    "Telefone",
+    "Acompanhantes",
+    "Total de pessoas",
+    "Status",
+    "Adultos",
+    "Crianças",
+    "Mensagem",
+    "Confirmado em",
+  ];
   const body = rows.map((guest) => [
     guest.name,
     guest.phone ?? "",
     String(guest.companions),
     String(guest.totalPeople),
     statusLabels[guest.status],
-    guest.notes ?? "",
+    guest.adultNames ?? "",
+    guest.childNames ?? "",
+    guest.message ?? "",
     formatDate(guest.createdAt),
   ]);
 
@@ -72,6 +123,8 @@ export function AdminDashboard() {
   const [status, setStatus] = useState<RsvpStatus | "all">("all");
   const [isLoading, setIsLoading] = useState(true);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [deletingGuestId, setDeletingGuestId] = useState<string | null>(null);
+  const [guestPendingDeletion, setGuestPendingDeletion] = useState<RsvpGuest | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -93,7 +146,7 @@ export function AdminDashboard() {
           },
         });
         const payload = (await response.json()) as
-          | { ok: true; rows: RsvpConfirmationRow[] }
+          | { ok: true; rows: RsvpConfirmationRow[]; deletedId?: never }
           | { ok: false; message: string };
 
         if (!response.ok) {
@@ -122,8 +175,10 @@ export function AdminDashboard() {
 
     return guests.filter((guest) => {
       const matchesStatus = status === "all" || guest.status === status;
-      const matchesSearch =
-        !search || normalize(`${guest.name} ${guest.phone ?? ""} ${guest.notes ?? ""}`).includes(search);
+      const searchableContent = `${guest.name} ${guest.phone ?? ""} ${guest.adultNames ?? ""} ${
+        guest.childNames ?? ""
+      } ${guest.message ?? ""}`;
+      const matchesSearch = !search || normalize(searchableContent).includes(search);
 
       return matchesStatus && matchesSearch;
     });
@@ -148,6 +203,48 @@ export function AdminDashboard() {
     await router.push("/login");
   }
 
+  async function deleteGuest(guest: RsvpGuest) {
+    setDeletingGuestId(guest.id);
+    setError("");
+
+    try {
+      const supabase = getSupabaseBrowserClient();
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+
+      if (sessionError || !sessionData.session) {
+        await router.replace("/login");
+        return;
+      }
+
+      const response = await fetch(`/api/rsvps?id=${encodeURIComponent(guest.id)}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${sessionData.session.access_token}`,
+        },
+      });
+      const payload = (await response.json()) as
+        | { ok: true; deletedId: string; rows?: never }
+        | { ok: false; message: string };
+
+      if (!response.ok) {
+        setError(payload.ok ? "Não foi possível excluir o registro." : payload.message);
+        return;
+      }
+
+      if (!payload.ok) {
+        setError(payload.message);
+        return;
+      }
+
+      setGuests((currentGuests) => currentGuests.filter((currentGuest) => currentGuest.id !== payload.deletedId));
+      setGuestPendingDeletion(null);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Não foi possível excluir o registro.");
+    } finally {
+      setDeletingGuestId(null);
+    }
+  }
+
   function exportCsv() {
     const csv = makeCsv(filteredGuests);
     const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
@@ -162,12 +259,12 @@ export function AdminDashboard() {
 
   if (isLoading) {
     return (
-      <main className="admin-shell">
-        <div className="screen-state">
-          <strong>Carregando confirmações...</strong>
-          <span>Estamos consultando os dados salvos no Supabase.</span>
-        </div>
-      </main>
+        <main className="admin-shell">
+          <div className="screen-state">
+            <strong>Carregando confirmações...</strong>
+          <span>Estamos consultando os dados salvos da lista de presença.</span>
+          </div>
+        </main>
     );
   }
 
@@ -188,7 +285,7 @@ export function AdminDashboard() {
         <div>
           <p className="eyebrow">Controle de presença</p>
           <h1>Lista dos convidados</h1>
-          <p className="header-copy">Dados carregados diretamente da landing page pelo Supabase.</p>
+          <p className="header-copy">Dados carregados diretamente das confirmações da landing page.</p>
         </div>
 
         <div className="account-actions">
@@ -249,15 +346,29 @@ export function AdminDashboard() {
 
       <section className="guest-list" aria-label="Lista de convidados">
         <div className="table-wrap">
-          <table>
+          <table className="guest-table">
+            <colgroup>
+              <col className="col-guest" />
+              <col className="col-phone" />
+              <col className="col-people" />
+              <col className="col-status" />
+              <col className="col-adults" />
+              <col className="col-children" />
+              <col className="col-message" />
+              <col className="col-date" />
+              <col className="col-actions" />
+            </colgroup>
             <thead>
               <tr>
                 <th>Convidado</th>
                 <th>Telefone</th>
                 <th>Pessoas</th>
                 <th>Status</th>
-                <th>Observações</th>
+                <th>Adultos</th>
+                <th>Crianças</th>
+                <th>Mensagem</th>
                 <th>Enviado em</th>
+                <th>Ações</th>
               </tr>
             </thead>
             <tbody>
@@ -271,12 +382,85 @@ export function AdminDashboard() {
                   <td>
                     <span className={`status-pill ${statusClasses[guest.status]}`}>{statusLabels[guest.status]}</span>
                   </td>
-                  <td>{guest.notes ?? "-"}</td>
+                  <td className="text-cell">{guest.adultNames ?? "-"}</td>
+                  <td className="text-cell">{guest.childNames ?? "-"}</td>
+                  <td className="text-cell">{guest.message ?? "-"}</td>
                   <td>{formatDate(guest.createdAt)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="danger-button"
+                      onClick={() => setGuestPendingDeletion(guest)}
+                      disabled={deletingGuestId === guest.id}
+                    >
+                      {deletingGuestId === guest.id ? "Excluindo..." : "Excluir"}
+                    </button>
+                  </td>
                 </tr>
               ))}
+
+              {filteredGuests.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="empty-table-cell">
+                    <div className="empty-state">
+                      <strong>Nenhum convidado encontrado.</strong>
+                      <span>Ajuste a busca ou troque o filtro de status.</span>
+                    </div>
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
+        </div>
+
+        <div className="guest-card-list">
+          {filteredGuests.map((guest) => (
+            <article className="guest-card" key={guest.id}>
+              <div className="guest-card-header">
+                <div>
+                  <span>Convidado</span>
+                  <strong>{guest.name}</strong>
+                </div>
+                <span className={`status-pill ${statusClasses[guest.status]}`}>{statusLabels[guest.status]}</span>
+              </div>
+
+              <dl className="guest-card-grid">
+                <div>
+                  <dt>Telefone</dt>
+                  <dd>{guest.phone ?? "-"}</dd>
+                </div>
+                <div>
+                  <dt>Pessoas</dt>
+                  <dd>{guest.totalPeople > 0 ? guest.totalPeople : "-"}</dd>
+                </div>
+                <div>
+                  <dt>Adultos</dt>
+                  <dd>{guest.adultNames ?? "-"}</dd>
+                </div>
+                <div>
+                  <dt>Crianças</dt>
+                  <dd>{guest.childNames ?? "-"}</dd>
+                </div>
+                <div>
+                  <dt>Mensagem</dt>
+                  <dd>{guest.message ?? "-"}</dd>
+                </div>
+                <div>
+                  <dt>Enviado em</dt>
+                  <dd>{formatDate(guest.createdAt)}</dd>
+                </div>
+              </dl>
+
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => setGuestPendingDeletion(guest)}
+                disabled={deletingGuestId === guest.id}
+              >
+                {deletingGuestId === guest.id ? "Excluindo..." : "Excluir registro"}
+              </button>
+            </article>
+          ))}
 
           {filteredGuests.length === 0 ? (
             <div className="empty-state">
@@ -286,6 +470,51 @@ export function AdminDashboard() {
           ) : null}
         </div>
       </section>
+
+      {guestPendingDeletion ? (
+        <div
+          className="modal-overlay"
+          role="presentation"
+          onMouseDown={() => {
+            if (deletingGuestId !== guestPendingDeletion.id) {
+              setGuestPendingDeletion(null);
+            }
+          }}
+        >
+          <section
+            className="confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-modal-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <p className="eyebrow">Excluir confirmação</p>
+            <h2 id="delete-modal-title">Remover este registro?</h2>
+            <p>
+              A confirmação de <strong>{guestPendingDeletion.name}</strong> será removida da lista de presença.
+            </p>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setGuestPendingDeletion(null)}
+                disabled={deletingGuestId === guestPendingDeletion.id}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => deleteGuest(guestPendingDeletion)}
+                disabled={deletingGuestId === guestPendingDeletion.id}
+              >
+                {deletingGuestId === guestPendingDeletion.id ? "Excluindo..." : "Excluir definitivamente"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

@@ -7,6 +7,9 @@ export type RsvpGuest = {
   companions: number;
   status: RsvpStatus;
   notes: string | null;
+  adultNames: string | null;
+  childNames: string | null;
+  message: string | null;
   totalPeople: number;
   createdAt: string;
   updatedAt: string;
