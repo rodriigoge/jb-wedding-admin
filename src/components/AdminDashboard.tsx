@@ -96,7 +96,12 @@ export function AdminDashboard() {
           | { ok: true; rows: RsvpConfirmationRow[] }
           | { ok: false; message: string };
 
-        if (!response.ok || !payload.ok) {
+        if (!response.ok) {
+          setError(payload.ok ? "Não foi possível carregar as confirmações." : payload.message);
+          return;
+        }
+
+        if (!payload.ok) {
           setError(payload.message);
           return;
         }
